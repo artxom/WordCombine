@@ -27,7 +27,13 @@ def main() -> int:
     _ensure_stdio_for_windowed_cli()
     from word_combine.cli import main as cli_main
 
-    return cli_main(sys.argv[1:])
+    try:
+        return cli_main(sys.argv[1:])
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

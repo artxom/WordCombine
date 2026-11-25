@@ -17,6 +17,7 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -37,16 +38,14 @@ jobs:
       - name: Smoke test WordCombine.exe
         shell: pwsh
         run: |
-          $tmp = Join-Path $env:TEMP "wc_smoke"
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-          $f1 = Join-Path $tmp "1. first.docx"
-          $f2 = Join-Path $tmp "2. second.docx"
-          $out = Join-Path $tmp "merged.docx"
-          python -c "import sys; from docx import Document; d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(sys.argv[1]); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(sys.argv[2])" $f1 $f2
-          $proc = Start-Process -FilePath "dist\WordCombine.exe" -ArgumentList @("--files", $f1, $f2, "-o", $out, "--no-refresh-toc", "--verify") -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "WordCombine.exe exited with code $($proc.ExitCode)" }
-          python -c "import sys; from word_combine.verifier import verify_merged_docx; rep = verify_merged_docx([sys.argv[1], sys.argv[2]], sys.argv[3]); print(rep.format_summary()); assert rep.ok, rep.errors" $f1 $f2 $out
-          Remove-Item -Recurse -Force $tmp
+          $td = Join-Path $env:TEMP "wc_smoke"
+          New-Item -ItemType Directory -Force -Path $td | Out-Null
+          try {
+            python -c "import os, subprocess, sys; from docx import Document; from word_combine.verifier import verify_merged_docx; td=sys.argv[1]; f1=os.path.join(td,'1. first.docx'); f2=os.path.join(td,'2. second.docx'); out=os.path.join(td,'merged.docx'); d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(f1); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(f2); p=subprocess.run([os.path.abspath(r'dist\WordCombine.exe'),'--files',f1,f2,'-o',out,'--no-refresh-toc','--verify'],timeout=90); assert p.returncode==0, f'exit={p.returncode}'; rep=verify_merged_docx([f1,f2],out); print(rep.format_summary()); assert rep.ok, rep.errors" $td
+            if ($LASTEXITCODE -ne 0) { throw "Smoke test failed with exit code $LASTEXITCODE" }
+          } finally {
+            Remove-Item -Recurse -Force $td -ErrorAction SilentlyContinue
+          }
 
       - name: Prepare Windows release asset
         shell: pwsh
@@ -63,6 +62,7 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
