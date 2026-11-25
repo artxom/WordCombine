@@ -1,0 +1,21 @@
+# Private documents and generated output
+*.docx
+output/
+
+# Packaging and build artifacts
+build/
+dist/
+release_assets/
+*.egg-info/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db

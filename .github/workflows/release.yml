@@ -1,0 +1,140 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Build version tag (e.g. v1.0.0)"
+        required: false
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Windows standalone executable
+        run: pyinstaller packaging/word_combine.spec --noconfirm --clean
+
+      - name: Smoke test WordCombine.exe
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:TEMP "wc_smoke"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $f1 = Join-Path $tmp "1. first.docx"
+          $f2 = Join-Path $tmp "2. second.docx"
+          $out = Join-Path $tmp "merged.docx"
+          python -c "import sys; from docx import Document; d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(sys.argv[1]); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(sys.argv[2])" $f1 $f2
+          $proc = Start-Process -FilePath "dist\WordCombine.exe" -ArgumentList @("--files", $f1, $f2, "-o", $out, "--no-refresh-toc", "--verify") -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "WordCombine.exe exited with code $($proc.ExitCode)" }
+          python -c "import sys; from word_combine.verifier import verify_merged_docx; rep = verify_merged_docx([sys.argv[1], sys.argv[2]], sys.argv[3]); print(rep.format_summary()); assert rep.ok, rep.errors" $f1 $f2 $out
+          Remove-Item -Recurse -Force $tmp
+
+      - name: Prepare Windows release asset
+        shell: pwsh
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.version }}" }
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "v1.0.0" }
+          New-Item -ItemType Directory -Force -Path release_assets | Out-Null
+          Copy-Item "dist\WordCombine.exe" "release_assets\WordCombine-$ver-Windows-x64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release_assets/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build macOS app bundle
+        run: pyinstaller packaging/word_combine.spec --noconfirm --clean
+
+      - name: Smoke test WordCombine.app binary
+        run: |
+          TMP_DIR=$(mktemp -d)
+          python3 -c "import sys; from docx import Document; d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(sys.argv[1]); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(sys.argv[2])" "$TMP_DIR/1. first.docx" "$TMP_DIR/2. second.docx"
+          ./dist/WordCombine.app/Contents/MacOS/WordCombine \
+            --files "$TMP_DIR/1. first.docx" "$TMP_DIR/2. second.docx" \
+            -o "$TMP_DIR/merged.docx" --no-refresh-toc --verify
+          rm -rf "$TMP_DIR"
+
+      - name: Package macOS zip
+        run: |
+          VER="${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}"
+          VER="${VER:-v1.0.0}"
+          ARCH="$(uname -m)"
+          mkdir -p release_assets
+          ditto -c -k --sequesterRsrc --keepParent dist/WordCombine.app "release_assets/WordCombine-${VER}-macOS-${ARCH}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: release_assets/*.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files and SHA256SUMS
+        run: |
+          mkdir -p final_release
+          find artifacts -type f \( -name "*.exe" -o -name "*.zip" \) -exec cp {} final_release/ \;
+          (cd final_release && sha256sum * > SHA256SUMS.txt)
+          ls -lh final_release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WordCombine ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ### Word 文档高保真拼接工具 ${{ github.ref_name }}
+
+            - **Windows**：下载 `WordCombine-${{ github.ref_name }}-Windows-x64.exe`，双击即可运行（无需安装 Python）。
+            - **macOS**：下载 `WordCombine-${{ github.ref_name }}-macOS-arm64.zip` 解压后运行 `WordCombine.app`。
+
+            #### 主要特性
+            - 按文件名数字自然顺序首尾拼接 `.docx` 文档（如 `3.9` < `3.10` < `4.`）。
+            - 高保真保留原文档段落、表格、样式、独立章节编号、嵌入图片、Excel OLE 对象、批注、脚注/尾注及节页眉页脚隔离。
+            - 拼接后若包含目录，自动后台静默调用本机 Word / WPS 刷新目录与页码（Windows COM / macOS AppleScript）。
+            - 图形界面实时显示每个文档的合并状态、阶段进度条、百分比、已用时和执行日志，并提供严格内容一致性校验。
+          files: |
+            final_release/*.exe
+            final_release/*.zip
+            final_release/SHA256SUMS.txt
