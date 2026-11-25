@@ -192,7 +192,19 @@ def detect_tocs(docx_path: str) -> TOCInfo:
     with zipfile.ZipFile(docx_path, "r") as zf:
         if "word/document.xml" not in zf.namelist():
             return TOCInfo(count=0, sdt_count=0, field_count=0, instructions=[])
-        doc_root = _parse_xml(zf.read("word/document.xml"))
+        raw_xml = zf.read("word/document.xml")
+
+    # Fast lossless raw-bytes pre-filter: avoid parsing huge XML DOMs when no TOC markers exist.
+    if (
+        not raw_xml.startswith((b"\xff\xfe", b"\xfe\xff"))
+        and b"\x00" not in raw_xml[:32]
+        and b"docPartGallery" not in raw_xml
+        and b"instrText" not in raw_xml
+        and b"fldSimple" not in raw_xml
+    ):
+        return TOCInfo(count=0, sdt_count=0, field_count=0, instructions=[])
+
+    doc_root = _parse_xml(raw_xml)
 
     sdt_toc_elements: Set[int] = set()
     instructions: List[str] = []

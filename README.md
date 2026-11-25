@@ -16,10 +16,27 @@ WordCombine 是一个跨平台（Windows + macOS）桌面工具，可将选中�
 
 前往仓库的 **Releases** 页面下载对应平台安装包：
 
-- **Windows**：下载 `WordCombine-v1.0.0-Windows-x64.exe`，双击即可运行。
-- **macOS**：下载 `WordCombine-v1.0.0-macOS-arm64.zip`，解压后打开 `WordCombine.app`。
+- **Windows（免解压秒开推荐）**：下载 `WordCombine-v1.0.1-Windows-x64-FastStart.zip`，解压后双击文件夹内的 `WordCombine.exe`，免去单文件解包等待，几乎秒开。
+- **Windows（单文件便携版）**：下载 `WordCombine-v1.0.1-Windows-x64.exe`，双击即可运行；内建原生启动画面与进度提示，避免冷启动及后台引擎初始化期间让用户误以为卡死。
+- **macOS**：下载 `WordCombine-v1.0.1-macOS-arm64.zip`，解压后打开 `WordCombine.app`。
 
 > **提示**：如 Windows SmartScreen 或 macOS 首次打开未签名应用提示安全警告，选择“仍要运行 / 仍要打开”即可。
+
+## 启动与交互性能优化
+
+- **原生启动反馈 & 秒开打包模式**：Windows 单文件版禁用 UPX 避免杀毒引擎长时扫描，并在 Python/Tk 加载前由引导器优先展示启动卡片；同时提供免解压 `onedir` (`FastStart.zip`) 打包。
+- **界面秒开与延迟加载**：将 `lxml` 解析引擎、目录检测和校验模块延迟到窗口显示后于后台线程预热，主窗口无白屏闪烁。
+- **异步目录扫描**：添加多份大型 `.docx` 文件时，表格立即呈现（目录列显示 `检测中...`），后台采用字节级快速预过滤配合异步线程刷新目录状态，杜绝主线程阻塞导致的 `(未响应)`。
+
+## 本地打包选项
+
+```bash
+# Windows 单文件版（默认，含启动画面）
+pyinstaller packaging/word_combine.spec --noconfirm --clean
+
+# Windows 免解压秒开版 (onedir)
+WORDCOMBINE_WIN_MODE=onedir pyinstaller packaging/word_combine.spec --noconfirm --clean
+```
 
 ## 本地开发与命令行运行
 
@@ -42,13 +59,13 @@ python word_combine.py --dir ./docs -o ./output/合并文档_含目录.docx --in
 python -m unittest discover -s tests -v
 ```
 
-## 通过 GitHub Actions 打包并发布 v1.0.0
+## 通过 GitHub Actions 打包并发布
 
-本仓库已配置 `.github/workflows/release.yml`，推送形如 `v1.0.0` 的版本标签即可自动在云端构建 Windows `.exe` 与 macOS `.app` 压缩包并创建 GitHub Release：
+本仓库已配置 `.github/workflows/release.yml`，推送形如 `v1.0.1` 的版本标签即可自动在云端构建 Windows 单文件 `.exe`、Windows 免解压 `FastStart.zip` 与 macOS `.app` 压缩包并创建 GitHub Release：
 
 ```bash
 git remote add origin https://github.com/<你的用户名>/<你的仓库名>.git
 git push -u origin main
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```

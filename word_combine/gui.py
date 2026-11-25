@@ -10,13 +10,11 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import __version__
-from .ooxml_merger import detect_tocs, merge_docx_files
 from .sorting import collect_docx_files, sort_docx_paths
-from .toc_refresher import refresh_toc_silent
-from .verifier import verify_merged_docx
+from .splash import close_splash, update_splash
 
 _TOC_CACHE_TYPE = Dict[str, Tuple[int, int, str]]
 
@@ -85,6 +83,12 @@ class WordCombineApp:
         self.file_paths: List[str] = []
         self.file_statuses: Dict[str, str] = {}
         self._toc_cache: _TOC_CACHE_TYPE = {}
+        self._toc_pending: Set[str] = set()
+        self._toc_scan_queue: "queue.Queue[Optional[Tuple[str, int, int]]]" = queue.Queue()
+        self._toc_thread: Optional[threading.Thread] = None
+        self._warmup_thread: Optional[threading.Thread] = None
+        self._engine_ready = False
+        self._stop_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
         self.msg_queue: "queue.Queue[tuple]" = queue.Queue()
 
@@ -110,8 +114,47 @@ class WordCombineApp:
 
         self._editable_widgets: List[tk.Widget] = []
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<Destroy>", self._on_destroy, add=True)
+        self.root.after(20, self._start_engine_warmup)
         self.root.after(100, self._poll_queue)
         self.root.after(500, self._tick_elapsed)
+
+    def shutdown(self) -> None:
+        """Stop background warm-up and TOC scan threads cleanly."""
+        if not self._stop_event.is_set():
+            self._stop_event.set()
+            self._toc_scan_queue.put(None)
+        if self._toc_thread and self._toc_thread.is_alive():
+            self._toc_thread.join(timeout=1.0)
+
+    def _on_close(self) -> None:
+        self.shutdown()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _on_destroy(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if event.widget is self.root:
+            self.shutdown()
+
+    def _start_engine_warmup(self) -> None:
+        if self._stop_event.is_set():
+            return
+        if self._warmup_thread and self._warmup_thread.is_alive():
+            return
+
+        def _warmup() -> None:
+            try:
+                from . import ooxml_merger, toc_refresher, verifier  # noqa: F401
+            except Exception:
+                pass
+            if not self._stop_event.is_set():
+                self.msg_queue.put(("engine_ready",))
+
+        self._warmup_thread = threading.Thread(target=_warmup, daemon=True, name="wordcombine-warmup")
+        self._warmup_thread.start()
 
     def _load_app_icon(self) -> None:
         try:
@@ -300,19 +343,59 @@ class WordCombineApp:
             else:
                 widget.configure(state=state_val)
 
-    def _get_toc_label(self, path: str) -> str:
+    def _ensure_toc_scanner(self) -> None:
+        if self._stop_event.is_set():
+            return
+        if self._toc_thread and self._toc_thread.is_alive():
+            return
+        self._toc_thread = threading.Thread(
+            target=self._toc_scanner_loop,
+            daemon=True,
+            name="wordcombine-toc-scan",
+        )
+        self._toc_thread.start()
+
+    def _toc_scanner_loop(self) -> None:
+        while not self._stop_event.is_set():
+            item = self._toc_scan_queue.get()
+            if item is None or self._stop_event.is_set():
+                break
+            rp, mtime_ns, size = item
+            label = "?"
+            try:
+                from .ooxml_merger import detect_tocs
+
+                tinfo = detect_tocs(rp)
+                label = f"有({tinfo.count})" if tinfo.has_toc else "无"
+            except Exception:
+                label = "?"
+            if not self._stop_event.is_set():
+                self.msg_queue.put(("toc_result", rp, mtime_ns, size, label))
+
+    def _lookup_toc_label_nonblocking(self, path: str) -> str:
         try:
             rp = os.path.realpath(path)
             st = os.stat(rp)
-            cached = self._toc_cache.get(rp)
-            if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
-                return cached[2]
-            tinfo = detect_tocs(rp)
-            label = f"有({tinfo.count})" if tinfo.has_toc else "无"
-            self._toc_cache[rp] = (st.st_mtime_ns, st.st_size, label)
-            return label
-        except Exception:
+        except OSError:
             return "?"
+        cached = self._toc_cache.get(rp)
+        if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2]
+        if rp not in self._toc_pending:
+            self._toc_pending.add(rp)
+            self._ensure_toc_scanner()
+            self._toc_scan_queue.put((rp, st.st_mtime_ns, st.st_size))
+        return "检测中..."
+
+    def _apply_toc_label_to_rows(self, rp: str, label: str) -> None:
+        for idx, p in enumerate(self.file_paths):
+            if os.path.realpath(p) == rp:
+                iid = str(idx)
+                if self.tree.exists(iid):
+                    vals = list(self.tree.item(iid, "values"))
+                    if len(vals) >= 6 and vals[3] != label:
+                        vals[3] = label
+                        self.tree.item(iid, values=vals)
 
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
@@ -331,7 +414,7 @@ class WordCombineApp:
         for idx, path in enumerate(self.file_paths, start=1):
             name = os.path.basename(path)
             size_str = f"{os.path.getsize(path) / 1024:,.1f} KB" if os.path.isfile(path) else "-"
-            toc_str = self._get_toc_label(path)
+            toc_str = self._lookup_toc_label_nonblocking(path)
             status_str = self.file_statuses.get(os.path.realpath(path), "待处理")
             self.tree.insert("", tk.END, iid=str(idx - 1), values=(idx, name, size_str, toc_str, status_str, path))
 
@@ -473,9 +556,15 @@ class WordCombineApp:
         return f"已用时 {mins:02d}:{rem:02d}"
 
     def _tick_elapsed(self) -> None:
-        if self._is_running and self._run_start_time is not None:
-            self.elapsed_var.set(self._format_elapsed())
-        self.root.after(500, self._tick_elapsed)
+        if self._stop_event.is_set():
+            return
+        try:
+            if self._is_running and self._run_start_time is not None:
+                self.elapsed_var.set(self._format_elapsed())
+            if not self._stop_event.is_set():
+                self.root.after(500, self._tick_elapsed)
+        except tk.TclError:
+            pass
 
     def _start_merge(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
@@ -519,6 +608,10 @@ class WordCombineApp:
 
         def _worker() -> None:
             try:
+                from .ooxml_merger import merge_docx_files
+                from .toc_refresher import refresh_toc_silent
+                from .verifier import verify_merged_docx
+
                 def _prog(msg: str, cur: int, total: int) -> None:
                     pct = int((cur / max(total, 1)) * 70)
                     self.msg_queue.put(("progress", pct, f"阶段 1/3：{msg}", False))
@@ -585,52 +678,82 @@ class WordCombineApp:
         self.worker_thread.start()
 
     def _poll_queue(self) -> None:
-        while True:
-            try:
-                item = self.msg_queue.get_nowait()
-            except queue.Empty:
-                break
-            kind = item[0]
-            if kind == "progress":
-                _, pct, msg, is_indet = item
-                self._set_progress_mode(bool(is_indet))
-                if not is_indet:
-                    self.progress["value"] = pct
-                self.pct_var.set(f"{pct}%")
-                self.status_var.set(msg)
-                self._append_log(msg)
-            elif kind == "file_status":
-                _, idx, status_label = item
-                self._update_row_status(idx, status_label)
-            elif kind == "log":
-                self._append_log(item[1])
-            elif kind == "done":
-                _, ok, msg = item
-                self._is_running = False
-                self._set_progress_mode(False)
-                self._set_controls_enabled(True)
-                elapsed_str = self._format_elapsed()
-                if elapsed_str:
-                    self.elapsed_var.set(elapsed_str)
-                if ok:
-                    self.progress["value"] = 100
-                    self.pct_var.set("100%")
-                self.status_var.set(msg)
-                self._append_log(f"{msg} ({elapsed_str})" if elapsed_str else msg)
-                if ok:
-                    messagebox.showinfo("完成", msg)
-                else:
-                    messagebox.showerror("失败", msg)
-        self.root.after(100, self._poll_queue)
+        if self._stop_event.is_set():
+            return
+        try:
+            while True:
+                try:
+                    item = self.msg_queue.get_nowait()
+                except queue.Empty:
+                    break
+                kind = item[0]
+                if kind == "engine_ready":
+                    self._engine_ready = True
+                elif kind == "toc_result":
+                    _, rp, mtime_ns, size, label = item
+                    self._toc_pending.discard(rp)
+                    self._toc_cache[rp] = (mtime_ns, size, label)
+                    self._apply_toc_label_to_rows(rp, label)
+                elif kind == "progress":
+                    _, pct, msg, is_indet = item
+                    self._set_progress_mode(bool(is_indet))
+                    if not is_indet:
+                        self.progress["value"] = pct
+                    self.pct_var.set(f"{pct}%")
+                    self.status_var.set(msg)
+                    self._append_log(msg)
+                elif kind == "file_status":
+                    _, idx, status_label = item
+                    self._update_row_status(idx, status_label)
+                elif kind == "log":
+                    self._append_log(item[1])
+                elif kind == "done":
+                    _, ok, msg = item
+                    self._is_running = False
+                    self._set_progress_mode(False)
+                    self._set_controls_enabled(True)
+                    elapsed_str = self._format_elapsed()
+                    if elapsed_str:
+                        self.elapsed_var.set(elapsed_str)
+                    if ok:
+                        self.progress["value"] = 100
+                        self.pct_var.set("100%")
+                    self.status_var.set(msg)
+                    self._append_log(f"{msg} ({elapsed_str})" if elapsed_str else msg)
+                    if ok:
+                        messagebox.showinfo("完成", msg)
+                    else:
+                        messagebox.showerror("失败", msg)
+            if not self._stop_event.is_set():
+                self.root.after(100, self._poll_queue)
+        except tk.TclError:
+            pass
 
 
-def create_app_window() -> tuple[tk.Tk, WordCombineApp]:
+def _center_window(root: tk.Tk, width: int = 980, height: int = 720) -> None:
+    root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = max(0, (sw - width) // 2)
+    y = max(0, (sh - height) // 2)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def create_app_window(show: bool = True) -> tuple[tk.Tk, WordCombineApp]:
     _enable_hidpi_before_tk()
     root = tk.Tk()
+    root.withdraw()
+    update_splash("Preparing window...")
     app = WordCombineApp(root)
+    _center_window(root, 980, 720)
+    if show:
+        root.deiconify()
+        root.lift()
+        root.update()
+        close_splash()
     return root, app
 
 
 def launch_gui() -> None:
-    root, _ = create_app_window()
+    root, _ = create_app_window(show=True)
     root.mainloop()

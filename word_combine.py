@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import multiprocessing
 import os
 import sys
+
+from word_combine.splash import close_splash, update_splash
 
 
 def _ensure_stdio_for_windowed_cli() -> None:
@@ -28,13 +29,14 @@ def _ensure_stdio_for_windowed_cli() -> None:
 
 
 def main() -> int:
-    multiprocessing.freeze_support()
     if len(sys.argv) <= 1:
+        update_splash("Loading interface...")
         from word_combine.gui import launch_gui
 
         launch_gui()
         return 0
 
+    close_splash()
     _ensure_stdio_for_windowed_cli()
     from word_combine.cli import main as cli_main
 

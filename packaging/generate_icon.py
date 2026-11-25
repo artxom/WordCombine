@@ -83,6 +83,47 @@ def _draw_icon(size: int = 512) -> Image.Image:
     return img
 
 
+def _load_cjk_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    candidates = [
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _draw_splash(icon: Image.Image) -> Image.Image:
+    width, height = 460, 200
+    # Opaque RGB PNG (Windows PyInstaller Splash uses #ff00ff as transparent key, never use alpha/magenta).
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    # Outer 1px border and top accent stripe
+    draw.rectangle([0, 0, width - 1, height - 1], outline=(203, 213, 225), width=1)
+    draw.rectangle([0, 0, width - 1, 5], fill=(27, 94, 194))
+
+    # Paste rounded squircle icon cleanly onto white card
+    badge = icon.resize((84, 84), Image.Resampling.LANCZOS)
+    canvas.paste(badge, (28, 36), mask=badge.split()[3])
+
+    title_font = _load_cjk_font(20)
+    sub_font = _load_cjk_font(13)
+    draw.text((128, 48), "Word 文档高保真拼接工具", fill=(15, 23, 42), font=title_font)
+    draw.text((128, 86), "正在启动，请稍候...", fill=(71, 85, 105), font=sub_font)
+
+    # Subtle divider separating card content from PyInstaller live progress text at bottom
+    draw.line([(24, 148), (width - 24, 148)], fill=(226, 232, 240), width=1)
+    return canvas
+
+
 def main() -> None:
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     assets_dir = os.path.join(repo_root, "assets")
@@ -91,6 +132,9 @@ def main() -> None:
     master = _draw_icon(512)
     png_path = os.path.join(assets_dir, "icon.png")
     master.resize((256, 256), Image.Resampling.LANCZOS).save(png_path, format="PNG")
+
+    splash_path = os.path.join(assets_dir, "splash.png")
+    _draw_splash(master).save(splash_path, format="PNG", optimize=True)
 
     ico_path = os.path.join(assets_dir, "icon.ico")
     master.save(

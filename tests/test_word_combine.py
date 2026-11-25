@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unicodedata
 import unittest
@@ -542,18 +544,112 @@ class WindowsTocRefresherTests(unittest.TestCase):
             self.assertEqual(res_skip.status, "skipped")
 
 
+class DetectTocsTests(unittest.TestCase):
+    def test_detect_tocs_fast_prefilter_and_all_toc_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            plain = os.path.join(td, "plain.docx")
+            _make_basic_docx(plain, ["Plain paragraph without TOC"])
+            plain_info = detect_tocs(plain)
+            self.assertFalse(plain_info.has_toc)
+            self.assertEqual((plain_info.count, plain_info.sdt_count, plain_info.field_count), (0, 0, 0))
+
+            sdt_doc = os.path.join(td, "sdt_toc.docx")
+            _make_basic_docx(sdt_doc, ["TOC_MARKER"])
+            with zipfile.ZipFile(sdt_doc) as z:
+                doc_xml = etree.fromstring(z.read("word/document.xml"))
+            body = doc_xml.find(f"{W}body")
+            body[0] = etree.fromstring(
+                f'<w:sdt xmlns:w="{NS_W}"><w:sdtPr><w:docPartObj>'
+                f'<w:docPartGallery w:val="Table of Contents"/><w:docPartUnique/>'
+                f'</w:docPartObj></w:sdtPr><w:sdtContent><w:p>'
+                f'<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                f'<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>'
+                f'<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+                f'</w:p></w:sdtContent></w:sdt>'
+            )
+            _rewrite_zip(
+                sdt_doc,
+                {"word/document.xml": etree.tostring(doc_xml, xml_declaration=True, encoding="UTF-8", standalone=True)},
+            )
+            sdt_info = detect_tocs(sdt_doc)
+            self.assertTrue(sdt_info.has_toc)
+            self.assertEqual((sdt_info.count, sdt_info.sdt_count, sdt_info.field_count), (1, 1, 1))
+
+            instr_doc = os.path.join(td, "instr_toc.docx")
+            _make_basic_docx(instr_doc, ["MARKER"])
+            with zipfile.ZipFile(instr_doc) as z:
+                doc_xml = etree.fromstring(z.read("word/document.xml"))
+            doc_xml.find(f"{W}body")[0] = etree.fromstring(
+                f'<w:p xmlns:w="{NS_W}">'
+                f'<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                f'<w:r><w:instrText xml:space="preserve"> TOC \\o "1-2" \\h </w:instrText></w:r>'
+                f'<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+            )
+            _rewrite_zip(
+                instr_doc,
+                {"word/document.xml": etree.tostring(doc_xml, xml_declaration=True, encoding="UTF-8", standalone=True)},
+            )
+            instr_info = detect_tocs(instr_doc)
+            self.assertTrue(instr_info.has_toc)
+            self.assertEqual((instr_info.count, instr_info.sdt_count, instr_info.field_count), (1, 0, 1))
+
+            simple_doc = os.path.join(td, "fldsimple_toc.docx")
+            _make_basic_docx(simple_doc, ["MARKER"])
+            with zipfile.ZipFile(simple_doc) as z:
+                doc_xml = etree.fromstring(z.read("word/document.xml"))
+            doc_xml.find(f"{W}body")[0] = etree.fromstring(
+                f'<w:p xmlns:w="{NS_W}"><w:fldSimple w:instr=" TOC \\o &quot;1-3&quot; "/></w:p>'
+            )
+            _rewrite_zip(
+                simple_doc,
+                {"word/document.xml": etree.tostring(doc_xml, xml_declaration=True, encoding="UTF-8", standalone=True)},
+            )
+            simple_info = detect_tocs(simple_doc)
+            self.assertTrue(simple_info.has_toc)
+            self.assertEqual((simple_info.count, simple_info.sdt_count, simple_info.field_count), (1, 0, 1))
+
+
+class PackageAndSplashTests(unittest.TestCase):
+    def test_lazy_package_exports_and_no_eager_lxml_on_gui_import(self) -> None:
+        import word_combine
+
+        self.assertEqual(word_combine.__version__, "1.0.1")
+        for attr in ("merge_docx_files", "detect_tocs", "verify_merged_docx", "refresh_toc_silent"):
+            self.assertTrue(callable(getattr(word_combine, attr)))
+        with self.assertRaises(AttributeError):
+            _ = word_combine.non_existent_symbol  # type: ignore[attr-defined]
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, word_combine, word_combine.gui; assert 'lxml' not in sys.modules, 'lxml imported eagerly'",
+            ],
+            cwd=WORKSPACE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+    def test_splash_helpers_safe_noop_without_bootloader(self) -> None:
+        from word_combine.splash import close_splash, update_splash
+
+        update_splash("Loading interface...")
+        close_splash()
+
+
 class GuiStateTests(unittest.TestCase):
     def test_gui_add_sort_cache_output_and_row_status(self) -> None:
         from word_combine.gui import create_app_window
 
         try:
-            root, app = create_app_window()
+            root, app = create_app_window(show=False)
         except Exception as exc:
             self.skipTest(f"Tk display unavailable: {exc}")
             return
 
-        try:
-            with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory() as td:
+            try:
                 f1 = os.path.join(td, "3.10 第二.docx")
                 f2 = os.path.join(td, "3.9 第一.docx")
                 _make_basic_docx(f1, ["B"])
@@ -563,8 +659,30 @@ class GuiStateTests(unittest.TestCase):
                 self.assertEqual([os.path.basename(p) for p in app.file_paths], ["3.9 第一.docx", "3.10 第二.docx"])
                 # Auto-updates default output path to first file's directory
                 self.assertEqual(app.output_var.get(), os.path.join(td, "合并文档.docx"))
-                # Cached TOC lookup populated
-                self.assertIn(os.path.realpath(f1), app._toc_cache)
+
+                # Immediate non-blocking insert shows "检测中..." before background scan completes
+                self.assertEqual(app.tree.item("0", "values")[3], "检测中...")
+                self.assertEqual(app.tree.item("1", "values")[3], "检测中...")
+
+                # Pump UI event loop until async TOC scan populates cache and updates rows
+                deadline = time.monotonic() + 5.0
+                rp1 = os.path.realpath(f1)
+                rp2 = os.path.realpath(f2)
+                while time.monotonic() < deadline:
+                    root.update()
+                    if (
+                        rp1 in app._toc_cache
+                        and rp2 in app._toc_cache
+                        and app.tree.item("0", "values")[3] == "无"
+                        and app.tree.item("1", "values")[3] == "无"
+                    ):
+                        break
+                    time.sleep(0.02)
+
+                self.assertIn(rp1, app._toc_cache)
+                self.assertIn(rp2, app._toc_cache)
+                self.assertEqual(app.tree.item("0", "values")[3], "无")
+                self.assertEqual(app.tree.item("1", "values")[3], "无")
 
                 # Row status column updates live
                 app._update_row_status(0, "合并中...")
@@ -572,8 +690,9 @@ class GuiStateTests(unittest.TestCase):
                 app._update_row_status(0, "已完成 ✓")
                 self.assertEqual(app.tree.item("0", "values")[4], "已完成 ✓")
                 root.update_idletasks()
-        finally:
-            root.destroy()
+            finally:
+                app.shutdown()
+                root.destroy()
 
 
 class RealWorkspaceIntegrationTests(unittest.TestCase):

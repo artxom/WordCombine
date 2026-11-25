@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Build version tag (e.g. v1.0.0)"
+        description: "Build version tag (e.g. v1.0.1)"
         required: false
-        default: "v1.0.0"
+        default: "v1.0.1"
 
 permissions:
   contents: write
@@ -32,36 +32,68 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build Windows standalone executable
+      - name: Build Windows onefile executable
         run: pyinstaller packaging/word_combine.spec --noconfirm --clean
 
-      - name: Smoke test WordCombine.exe
+      - name: Smoke test Windows onefile executable
         shell: pwsh
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
         run: |
-          $td = Join-Path $env:TEMP "wc_smoke"
+          $td = Join-Path $env:TEMP "wc_smoke_onefile"
           New-Item -ItemType Directory -Force -Path $td | Out-Null
           try {
             python -c "import os, subprocess, sys; from docx import Document; from word_combine.verifier import verify_merged_docx; td=sys.argv[1]; f1=os.path.join(td,'1. first.docx'); f2=os.path.join(td,'2. second.docx'); out=os.path.join(td,'merged.docx'); d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(f1); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(f2); p=subprocess.run([os.path.abspath(r'dist\WordCombine.exe'),'--files',f1,f2,'-o',out,'--no-refresh-toc','--verify'],timeout=90); assert p.returncode==0, f'exit={p.returncode}'; rep=verify_merged_docx([f1,f2],out); print(rep.format_summary()); assert rep.ok, rep.errors" $td
-            if ($LASTEXITCODE -ne 0) { throw "Smoke test failed with exit code $LASTEXITCODE" }
+            if ($LASTEXITCODE -ne 0) { throw "Onefile smoke test failed with exit code $LASTEXITCODE" }
           } finally {
             Remove-Item -Recurse -Force $td -ErrorAction SilentlyContinue
           }
 
-      - name: Prepare Windows release asset
+      - name: Stage Windows onefile release asset
         shell: pwsh
         run: |
           $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.version }}" }
-          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "v1.0.0" }
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "v1.0.1" }
           New-Item -ItemType Directory -Force -Path release_assets | Out-Null
           Copy-Item "dist\WordCombine.exe" "release_assets\WordCombine-$ver-Windows-x64.exe"
+          Remove-Item -Recurse -Force dist, build -ErrorAction SilentlyContinue
+
+      - name: Build Windows FastStart bundle (onedir)
+        shell: pwsh
+        env:
+          WORDCOMBINE_WIN_MODE: "onedir"
+        run: pyinstaller packaging/word_combine.spec --noconfirm --clean
+
+      - name: Smoke test Windows FastStart executable
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          $td = Join-Path $env:TEMP "wc_smoke_onedir"
+          New-Item -ItemType Directory -Force -Path $td | Out-Null
+          try {
+            python -c "import os, subprocess, sys; from docx import Document; from word_combine.verifier import verify_merged_docx; td=sys.argv[1]; f1=os.path.join(td,'1. first.docx'); f2=os.path.join(td,'2. second.docx'); out=os.path.join(td,'merged.docx'); d1=Document(); d1.add_paragraph('Smoke Part 1'); d1.save(f1); d2=Document(); d2.add_paragraph('Smoke Part 2'); d2.save(f2); p=subprocess.run([os.path.abspath(r'dist\WordCombine\WordCombine.exe'),'--files',f1,f2,'-o',out,'--no-refresh-toc','--verify'],timeout=90); assert p.returncode==0, f'exit={p.returncode}'; rep=verify_merged_docx([f1,f2],out); print(rep.format_summary()); assert rep.ok, rep.errors" $td
+            if ($LASTEXITCODE -ne 0) { throw "FastStart smoke test failed with exit code $LASTEXITCODE" }
+          } finally {
+            Remove-Item -Recurse -Force $td -ErrorAction SilentlyContinue
+          }
+
+      - name: Package Windows FastStart zip
+        shell: pwsh
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.version }}" }
+          if ([string]::IsNullOrWhiteSpace($ver)) { $ver = "v1.0.1" }
+          New-Item -ItemType Directory -Force -Path release_assets | Out-Null
+          Compress-Archive -Path "dist\WordCombine" -DestinationPath "release_assets\WordCombine-$ver-Windows-x64-FastStart.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: release_assets/*.exe
+          path: |
+            release_assets/*.exe
+            release_assets/*.zip
 
   build-macos:
     runs-on: macos-latest
@@ -129,10 +161,12 @@ jobs:
           body: |
             ### Word 文档高保真拼接工具 ${{ github.ref_name }}
 
-            - **Windows**：下载 `WordCombine-${{ github.ref_name }}-Windows-x64.exe`，双击即可运行（无需安装 Python）。
+            - **Windows（免解压秒开推荐）**：下载 `WordCombine-${{ github.ref_name }}-Windows-x64-FastStart.zip`，解压后双击目录中的 `WordCombine.exe` 即可瞬间启动（无需每次临时解压）。
+            - **Windows（单文件便携版）**：下载 `WordCombine-${{ github.ref_name }}-Windows-x64.exe`，自带原生启动进度卡片，双击即可运行（无需安装 Python）。
             - **macOS**：下载 `WordCombine-${{ github.ref_name }}-macOS-arm64.zip` 解压后运行 `WordCombine.app`。
 
             #### 主要特性
+            - **极速响应与防卡顿**：禁用 UPX 减少安全软件冷启动扫描耗时、精简冗余运行库、支持原生启动画面与主界面毫秒级显示，并将目录探测与引擎预热全部移至后台线程（大文档添加不再出现“未响应”）。
             - 按文件名数字自然顺序首尾拼接 `.docx` 文档（如 `3.9` < `3.10` < `4.`）。
             - 高保真保留原文档段落、表格、样式、独立章节编号、嵌入图片、Excel OLE 对象、批注、脚注/尾注及节页眉页脚隔离。
             - 拼接后若包含目录，自动后台静默调用本机 Word / WPS 刷新目录与页码（Windows COM / macOS AppleScript）。
