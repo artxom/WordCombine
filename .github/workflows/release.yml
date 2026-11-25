@@ -37,6 +37,9 @@ jobs:
 
       - name: Smoke test WordCombine.exe
         shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           $td = Join-Path $env:TEMP "wc_smoke"
           New-Item -ItemType Directory -Force -Path $td | Out-Null

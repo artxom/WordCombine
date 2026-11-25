@@ -9,11 +9,22 @@ import sys
 
 
 def _ensure_stdio_for_windowed_cli() -> None:
-    """Guard against sys.stdout / sys.stderr being None in PyInstaller --windowed builds."""
+    """Guard against None or non-UTF8 stdio streams in PyInstaller --windowed builds."""
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    elif hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    elif hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def main() -> int:
